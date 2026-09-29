@@ -6642,8 +6642,18 @@ static void hexpireGenericCommand(client *c, long long basetime, int unit) {
     hashTypeSetExInit(keyArg, hashObj, c, c->db, args.expireCondition, &exCtx);
     /* HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT only adjust the TTL of an
      * unchanged value: a field whose current TTL already elapsed must not
-     * be resurrected (see hpersistCommand(), which has the same check). */
-    exCtx.rejectAlreadyExpiredField = 1;
+     * be resurrected (see hpersistCommand(), which has the same check).
+     *
+     * That decision belongs only to whoever makes it against a live clock.
+     * A command already decided by the master (propagated write, or a
+     * command replayed while loading the AOF/RDB) must be applied as-is,
+     * and a replica must trust what the master already decided: our own
+     * clock may be later than the master's was when it accepted the
+     * command, e.g. a TTL extended just before its old, shorter TTL was
+     * due to elapse. Skip the check in exactly those cases, mirroring
+     * checkAlreadyExpired() in expire.c. */
+    exCtx.rejectAlreadyExpiredField = !server.loading && !server.masterhost &&
+        !(server.current_client && (server.current_client->flags & CLIENT_MASTER));
     addReplyArrayLen(c, args.fieldCount);
 
     /* Lazy allocation of fieldsToRemove - only allocate when failures occur */

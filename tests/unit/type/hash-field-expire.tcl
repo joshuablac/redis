@@ -2140,6 +2140,66 @@ start_server {tags {"external:skip needs:debug"}} {
                 # This is because TTLs are always replicated as absolute values
                 assert_equal [dumpAllHashes $primary] [dumpAllHashes $replica]
             }
+
+            test {Replica does not lose a TTL the primary legitimately extended before it elapsed} {
+                $primary del h20
+                $primary hset h20 f v
+                $primary hpexpire h20 400 FIELDS 1 f
+                assert {[$primary wait 1 2000] == 1}
+
+                # Stall the replica so it only applies the primary's next
+                # write (the TTL extension below, which the primary accepts
+                # because the field's *original* 400ms TTL hasn't elapsed
+                # yet) well after that original TTL would have elapsed by
+                # the replica's own clock -- the same race
+                # checkAlreadyExpired() already has to account for on
+                # ordinary key expiry.
+                set rd [redis_deferring_client 0]
+                $rd debug sleep 0.8
+                after 100
+                $primary hpexpire h20 100000 FIELDS 1 f
+                after 1200
+                assert {[$primary wait 1 2000] == 1}
+                $rd read
+                $rd close
+
+                assert_equal [$primary hget h20 f] "v"
+                assert_equal [$replica hget h20 f] "v"
+                assert {[$primary hpttl h20 FIELDS 1 f] > 90000}
+                assert {[$replica hpttl h20 FIELDS 1 f] > 90000}
+            }
+        }
+
+        start_server {overrides {appendonly {yes} appendfsync always} tags {external:skip}} {
+            foreach type {listpackex hashtable} {
+                if {$type eq "hashtable"} {
+                    r config set hash-max-listpack-entries 0
+                } else {
+                    r config set hash-max-listpack-entries 512
+                }
+
+                test "A TTL refresh applied before the old TTL elapsed survives an AOF reload ($type)" {
+                    # The field's TTL is extended *before* its original,
+                    # shorter TTL elapses, so the primary legitimately
+                    # accepts the extension and propagates it. By the time
+                    # the AOF is replayed, both HPEXPIREAT calls execute back
+                    # to back well after the original (superseded) TTL would
+                    # have elapsed on the loader's clock -- the resurrection
+                    # guard must not mistake that already-superseded TTL for
+                    # a field that's still logically expired right now.
+                    r del h
+                    r hset h f v g w
+                    r hpexpire h 300 FIELDS 1 f
+                    r hpexpire h 100000 FIELDS 1 f
+                    after 500
+                    assert_equal [r hget h f] "v"
+                    assert {[r hpttl h FIELDS 1 f] > 90000}
+
+                    r debug loadaof
+                    assert_equal [r hget h f] "v"
+                    assert {[r hpttl h FIELDS 1 f] > 90000}
+                }
+            }
         }
 
         test "Test HSETEX command replication" {
