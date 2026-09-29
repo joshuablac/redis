@@ -509,6 +509,34 @@ start_server {tags {"geo"}} {
         assert_equal [r zrange points{t} 0 -1] [r zrange points2{t} 0 -1]
     }
 
+    test {BZPOPMIN is woken when GEOSEARCHSTORE overwrites the destination key} {
+        r del points{t}
+        r geoadd points{t} 13.361389 38.115556 "Palermo" \
+                           15.087269 37.502669 "Catania"
+        r del dst{t}
+        set rd [redis_deferring_client]
+        $rd bzpopmin dst{t} 0
+        wait_for_blocked_client
+        r set dst{t} placeholder ;# wrong type: client stays blocked
+        r geosearchstore dst{t} points{t} fromlonlat 13.361389 38.115556 byradius 500 km
+        assert_equal {dst{t} Palermo} [lrange [$rd read] 0 1]
+        $rd close
+    }
+
+    test {BZPOPMIN is woken when GEORADIUS STORE overwrites the destination key} {
+        r del points{t}
+        r geoadd points{t} 13.361389 38.115556 "Palermo" \
+                           15.087269 37.502669 "Catania"
+        r del dst{t}
+        set rd [redis_deferring_client]
+        $rd bzpopmin dst{t} 0
+        wait_for_blocked_client
+        r set dst{t} placeholder ;# wrong type: client stays blocked
+        r georadius points{t} 13.361389 38.115556 500 km store dst{t}
+        assert_equal {dst{t} Palermo} [lrange [$rd read] 0 1]
+        $rd close
+    }
+
     test {GEORANGE STOREDIST option: plain usage} {
         r del points{t}
         r geoadd points{t} 13.361389 38.115556 "Palermo" \

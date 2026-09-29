@@ -2289,6 +2289,71 @@ start_server {tags {"zset"}} {
         $rd4 close
     }
 
+    foreach {pop} {BZPOPMIN BZMPOP_MIN} {
+        test "$pop when existing key is overwritten by ZUNIONSTORE" {
+            set rd [redis_deferring_client]
+            r del owzset{t} src{t}
+            r zadd src{t} 1 a 2 b
+
+            bzpop_command $rd $pop owzset{t} 0
+            wait_for_blocked_client
+            r set owzset{t} placeholder        ;# wrong type: client stays blocked
+            r zunionstore owzset{t} 1 src{t}   ;# owzset{t} overwritten -> zset {a b}
+            verify_pop_response $pop [$rd read] {owzset{t} a 1} {owzset{t} {{a 1}}}
+            $rd close
+        }
+
+        test "$pop when existing key is overwritten by ZINTERSTORE" {
+            set rd [redis_deferring_client]
+            r del owzset{t} src1{t} src2{t}
+            r zadd src1{t} 1 a 2 b
+            r zadd src2{t} 3 a 4 b
+
+            bzpop_command $rd $pop owzset{t} 0
+            wait_for_blocked_client
+            r zinterstore owzset{t} 2 src1{t} src2{t}
+            verify_pop_response $pop [$rd read] {owzset{t} a 4} {owzset{t} {{a 4}}}
+            $rd close
+        }
+
+        test "$pop when existing key is overwritten by ZDIFFSTORE" {
+            set rd [redis_deferring_client]
+            r del owzset{t} src1{t} src2{t}
+            r zadd src1{t} 1 a 2 b
+            r zadd src2{t} 3 b
+
+            bzpop_command $rd $pop owzset{t} 0
+            wait_for_blocked_client
+            r zdiffstore owzset{t} 2 src1{t} src2{t}
+            verify_pop_response $pop [$rd read] {owzset{t} a 1} {owzset{t} {{a 1}}}
+            $rd close
+        }
+
+        test "$pop when existing key is overwritten by ZRANGESTORE" {
+            set rd [redis_deferring_client]
+            r del owzset{t} src{t}
+            r zadd src{t} 1 a 2 b
+
+            bzpop_command $rd $pop owzset{t} 0
+            wait_for_blocked_client
+            r zrangestore owzset{t} src{t} 0 -1
+            verify_pop_response $pop [$rd read] {owzset{t} a 1} {owzset{t} {{a 1}}}
+            $rd close
+        }
+
+        test "$pop when key created by ZUNIONSTORE from nonexisting key" {
+            set rd [redis_deferring_client]
+            r del owzset{t} src{t}
+            r zadd src{t} 5 z
+
+            bzpop_command $rd $pop owzset{t} 0
+            wait_for_blocked_client
+            r zunionstore owzset{t} 1 src{t}
+            verify_pop_response $pop [$rd read] {owzset{t} z 5} {owzset{t} {{z 5}}}
+            $rd close
+        }
+    }
+
     test "BZMPOP propagate as pop with count command to replica" {
         set rd [redis_deferring_client]
         set repl [attach_to_replication_stream]

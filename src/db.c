@@ -812,6 +812,16 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
                 signalKeyAsReadyNonEmptyList(db, key);
             else
                 signalKeyAsReady(db, key, OBJ_LIST);
+        } else if (newtype == OBJ_ZSET && oldtype != OBJ_ZSET) {
+            /* A key that was missing or held another type is overwritten
+             * with a non-empty zset (ZUNIONSTORE/ZINTERSTORE/ZDIFFSTORE,
+             * ZRANGESTORE, GEOSEARCHSTORE, GEORADIUS[BYMEMBER] STORE).
+             * Wake BZPOPMIN/BZPOPMAX/BZMPOP clients blocked on it, same as
+             * for lists above. A pre-existing non-empty zset can never be
+             * overwritten while clients are still blocked on it (BZPOP*
+             * never blocks while the key already has elements), so there
+             * is no "grew" case to handle here. */
+            signalKeyAsReady(db, key, OBJ_ZSET);
         }
     } else {
         /* Add the new key to the database */
