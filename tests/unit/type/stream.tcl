@@ -3648,6 +3648,76 @@ start_server {tags {"stream needs:debug"} overrides {appendonly yes stream-node-
     }
 }
 
+start_server {tags {"stream needs:debug"} overrides {appendonly yes}} {
+    test {XTRIM with ~ MINID and DELREF can propagate correctly} {
+        # All three entries land in a single node (default stream-node-max-entries):
+        # DELREF must leave a tombstone at 1-0/2-0 instead of removing the whole
+        # node, so the propagated command has to target the original MINID (5-0),
+        # not "the first entry physically still in the stream" (which would be
+        # the 1-0 tombstone, a no-op MINID on replay).
+        r XADD mystream 1-0 f v
+        r XADD mystream 2-0 f v
+        r XADD mystream 8-0 f v
+        assert_equal 2 [r XTRIM mystream MINID ~ 5-0 DELREF]
+        assert_equal {{8-0 {f v}}} [r XRANGE mystream - +]
+        r debug loadaof
+        assert_equal {{8-0 {f v}}} [r XRANGE mystream - +]
+        assert_equal 1 [r XLEN mystream]
+    }
+}
+
+start_server {tags {"stream needs:debug"} overrides {appendonly yes}} {
+    test {XADD with ~ MINID and DELREF can propagate correctly} {
+        r XADD mystream 1-0 f v
+        r XADD mystream 2-0 f v
+        r XADD mystream DELREF MINID ~ 5-0 8-0 f v
+        assert_equal {{8-0 {f v}}} [r XRANGE mystream - +]
+        r debug loadaof
+        assert_equal {{8-0 {f v}}} [r XRANGE mystream - +]
+        assert_equal 1 [r XLEN mystream]
+    }
+}
+
+start_server {tags {"stream needs:debug"} overrides {appendonly yes}} {
+    test {XTRIM with ~ MINID and ACKED can propagate correctly} {
+        set origin [config_get_set stream-node-max-entries 2]
+        foreach id {1-0 2-0 3-0 4-0 5-0} { r XADD mystream $id f v }
+        r XGROUP CREATE mystream g 0
+        r XREADGROUP GROUP g c STREAMS mystream >
+        r XACK mystream g 1-0 2-0 4-0
+        assert_equal 3 [r XTRIM mystream MINID ~ 6-0 ACKED]
+        set before [r XRANGE mystream - +]
+        assert_equal {{3-0 {f v}} {5-0 {f v}}} $before
+        r debug loadaof
+        assert_equal $before [r XRANGE mystream - +]
+        r config set stream-node-max-entries $origin
+    }
+}
+
+start_server {tags {"stream needs:debug"} overrides {appendonly yes}} {
+    test {XTRIM with ~ MINID, ACKED and LIMIT does not over-trim on reload} {
+        # LIMIT stops the master before it ever looks at the second node, but
+        # the first node's ACKED processing already left a tombstone (1-0)
+        # behind a still-live entry (2-0). The propagated command must target
+        # the first ID of the untouched node (3-0), matching exactly what the
+        # master itself removed -- not "the first entry still in the stream"
+        # (1-0's tombstone, which would make the replica delete nothing) and
+        # not the original MINID 9-0 either (which would make the replica
+        # delete everything, over-trimming past what LIMIT allowed).
+        set origin [config_get_set stream-node-max-entries 2]
+        foreach id {1-0 2-0 3-0 4-0 5-0 6-0 7-0 8-0} { r XADD mystream $id f v }
+        r XGROUP CREATE mystream g 0
+        r XREADGROUP GROUP g c STREAMS mystream >
+        r XACK mystream g 1-0
+        assert_equal 1 [r XTRIM mystream MINID ~ 9-0 LIMIT 2 ACKED]
+        set before [r XRANGE mystream - +]
+        assert_equal {{2-0 {f v}} {3-0 {f v}} {4-0 {f v}} {5-0 {f v}} {6-0 {f v}} {7-0 {f v}} {8-0 {f v}}} $before
+        r debug loadaof
+        assert_equal $before [r XRANGE mystream - +]
+        r config set stream-node-max-entries $origin
+    }
+}
+
 start_server {tags {"stream"}} {
     test {XADD can CREATE an empty stream} {
         r XADD mystream MAXLEN 0 * a b

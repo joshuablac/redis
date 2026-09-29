@@ -781,6 +781,17 @@ typedef struct {
     long long maxlen; /* After trimming, leave stream at this length . */
     /* TRIM_STRATEGY_MINID options */
     streamID minid; /* Trim by ID (No stream entries with ID < 'minid' will remain) */
+
+    /* Output, populated by streamTrim() itself. Only used by
+     * streamRewriteTrimArgument() to propagate a MINID trim that used a
+     * non-KEEPREF delete strategy (DELREF/ACKED); MAXLEN and KEEPREF
+     * propagation are already deterministic without it. */
+    int trim_limit_reached;     /* 1 if the LIMIT cap stopped trimming short
+                                 * of the requested maxlen/minid boundary. */
+    streamID trim_limit_at_id;  /* Valid only if trim_limit_reached: ID of
+                                 * the first untouched node -- the safe
+                                 * MINID to propagate instead of the
+                                 * original target. */
 } streamAddTrimArgs;
 
 #define TRIM_STRATEGY_NONE 0
@@ -856,6 +867,8 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
     int trim_strategy = args->trim_strategy;
     int delete_strategy = args->delete_strategy;
 
+    args->trim_limit_reached = 0;
+
     if (trim_strategy == TRIM_STRATEGY_NONE)
         return 0;
 
@@ -872,8 +885,16 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         int64_t entries = lpGetInteger(p);
 
         /* Check if we exceeded the amount of work we could do */
-        if (limit && (deleted + entries) > limit)
+        if (limit && (deleted + entries) > limit) {
+            /* Report exactly where we stopped: this node (and everything
+             * after it) is untouched, while every earlier node was fully
+             * processed. A node's rax key equals the ID of its first
+             * entry, so decoding it gives the correct boundary for an
+             * equivalent exact trim (see streamRewriteTrimArgument()). */
+            args->trim_limit_reached = 1;
+            streamDecodeID(ri.key, &args->trim_limit_at_id);
             break;
+        }
 
         /* Check if we can remove the whole node */
         int remove_node = 0; /* Final decision flag for node removal */
@@ -2515,12 +2536,32 @@ void streamRewriteApproxSpecifier(client *c, int idx) {
     rewriteClientCommandArgument(c,idx,shared.special_equals);
 }
 
-/* We propagate MAXLEN/MINID ~ <count> as MAXLEN/MINID = <resulting-len-of-stream>
- * otherwise trimming is no longer deterministic on replicas / AOF. */
-void streamRewriteTrimArgument(client *c, stream *s, int trim_strategy, int idx) {
+/* We propagate MAXLEN ~ <count> as MAXLEN = <resulting-len-of-stream>, which
+ * is deterministic regardless of delete strategy: replaying it always trims
+ * to that exact length.
+ *
+ * MINID is different for the non-KEEPREF (DELREF/ACKED) delete strategies,
+ * because they leave deleted entries in place as tombstones instead of
+ * removing whole nodes: "first ID now in the stream" no longer identifies
+ * what was actually removed (ACKED especially can carve out non-contiguous
+ * holes). approx_trim makes no difference to DELREF/ACKED's per-entry
+ * result (see the note on approx_trim in streamAddTrimArgs) except for how
+ * far LIMIT let it get, so:
+ *  - if LIMIT didn't cut it short, replaying the *original* MINID as an
+ *    exact trim with the same delete strategy reproduces precisely the
+ *    same deletions;
+ *  - if LIMIT did cut it short, replay an exact trim to the first ID of
+ *    the first node the master left untouched (see streamTrim()), so the
+ *    replica/AOF stops at the same point instead of over-trimming.
+ * KEEPREF is unaffected (it only ever removes whole nodes, so "first ID
+ * now in the stream" is already exact) and keeps the original behavior. */
+void streamRewriteTrimArgument(client *c, stream *s, streamAddTrimArgs *args, int idx) {
     robj *arg;
-    if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
+    if (args->trim_strategy == TRIM_STRATEGY_MAXLEN) {
         arg = createStringObjectFromLongLong(s->length);
+    } else if (args->delete_strategy != DELETE_STRATEGY_KEEPREF) {
+        streamID *target = args->trim_limit_reached ? &args->trim_limit_at_id : &args->minid;
+        arg = createObjectFromStreamID(target);
     } else {
         streamID first_id;
         streamGetEdgeID(s,1,0,&first_id);
@@ -2657,7 +2698,7 @@ void xaddCommand(client *c) {
              * It's enough to check only args->approx because there is no
              * way LIMIT is given without the ~ option. */
             streamRewriteApproxSpecifier(c,parsed_args.trim_strategy_arg_idx-1);
-            streamRewriteTrimArgument(c,s,parsed_args.trim_strategy,parsed_args.trim_strategy_arg_idx);
+            streamRewriteTrimArgument(c,s,&parsed_args,parsed_args.trim_strategy_arg_idx);
         }
     }
 
@@ -5268,7 +5309,7 @@ void xtrimCommand(client *c) {
              * It's enough to check only args->approx because there is no
              * way LIMIT is given without the ~ option. */
             streamRewriteApproxSpecifier(c,parsed_args.trim_strategy_arg_idx-1);
-            streamRewriteTrimArgument(c,s,parsed_args.trim_strategy,parsed_args.trim_strategy_arg_idx);
+            streamRewriteTrimArgument(c,s,&parsed_args,parsed_args.trim_strategy_arg_idx);
         }
 
         /* Propagate the write. */
