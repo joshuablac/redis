@@ -2203,12 +2203,20 @@ size_t streamReplyWithRange(client *c, stream *s, streamReplyRangeArgs *args) {
         /* Update the group last_id if needed. */
         if (group && streamCompareID(&id,&group->last_id) > 0) {
             if (group->entries_read != SCG_INVALID_ENTRIES_READ &&
+                (uint64_t)group->entries_read < s->entries_added &&
                 streamCompareID(&group->last_id, &s->first_id) >= 0 &&
                 !streamRangeHasTombstones(s,&group->last_id,NULL))
             {
-                /* A valid counter and no tombstones between the group's last-delivered-id
-                 * and the stream's last-generated-id mean we can increment the read counter
-                 * to keep tracking the group's progress. */
+                /* A valid counter that hasn't already caught up with
+                 * entries_added, and no tombstones between the group's
+                 * last-delivered-id and the stream's last-generated-id, mean
+                 * we can increment the read counter to keep tracking the
+                 * group's progress. The entries_added bound also guards
+                 * against a counter set too high by XGROUP CREATE/SETID
+                 * ENTRIESREAD or XSETID ENTRIESADDED before this group had
+                 * read that far: without it, incrementing here could push
+                 * entries_read past entries_added, an invariant the RDB
+                 * loader enforces (and would otherwise refuse to load). */
                 group->entries_read++;
             } else if (s->entries_added) {
                 /* The group's counter may be invalid, so we try to obtain it. */

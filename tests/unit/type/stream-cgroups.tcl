@@ -4873,4 +4873,50 @@ start_server {tags {"stream external:skip needs:debug"}} {
         assert_equal [dict get $ginfo entries-read] 3
         assert_equal [dict get $ginfo lag] 97
     }
+
+    # XGROUP CREATE/SETID clamp ENTRIESREAD to entries_added at the moment
+    # the command runs, but a group positioned before the stream's last
+    # entry can still be given a counter that already counts entries it
+    # hasn't delivered yet. The next XREADGROUP would then increment past
+    # entries_added, an invariant the RDB loader enforces fatally ("Stream
+    # cgroup entries_read inconsistent with entries_added") -- reachable
+    # with ordinary commands, no DEBUG needed to trigger it (only to prove
+    # the RDB stays loadable here).
+    test "XGROUP CREATE ENTRIESREAD before the last entry keeps entries_read <= entries_added after reading" {
+        r DEL mystream
+        r XADD mystream 1-0 f v
+        r XADD mystream 8-0 f v
+        r XGROUP CREATE mystream grp 4-0 ENTRIESREAD 2
+        r XREADGROUP GROUP grp c STREAMS mystream >
+        set added [dict get [r XINFO STREAM mystream] entries-added]
+        set ginfo [lindex [r XINFO GROUPS mystream] 0]
+        assert {[dict get $ginfo entries-read] <= $added}
+        assert {[dict get $ginfo lag] >= 0}
+
+        r DEBUG RELOAD
+        set ginfo [lindex [r XINFO GROUPS mystream] 0]
+        assert {[dict get $ginfo entries-read] <= $added}
+        assert {[dict get $ginfo lag] >= 0}
+    }
+
+    # Same invariant, reached via XSETID ENTRIESADDED + XDEL instead of
+    # XGROUP CREATE/SETID ENTRIESREAD: this path bypasses the #15489
+    # XSETID-time clamp because entries_added is only lowered *after* the
+    # group's counter was already valid.
+    test "XSETID ENTRIESADDED then XDEL keeps entries_read <= entries_added after reading" {
+        r DEL mystream
+        for {set id 1} {$id <= 4} {incr id} { r XADD mystream $id-0 f v }
+        r XGROUP CREATE mystream grp 0
+        r XREADGROUP GROUP grp c COUNT 2 STREAMS mystream >
+        r XDEL mystream 1-0
+        r XSETID mystream 4-0 ENTRIESADDED 3
+        r XREADGROUP GROUP grp c STREAMS mystream >
+        set added [dict get [r XINFO STREAM mystream] entries-added]
+        set ginfo [lindex [r XINFO GROUPS mystream] 0]
+        assert {[dict get $ginfo entries-read] <= $added}
+        assert {[dict get $ginfo lag] >= 0}
+
+        r DEBUG RELOAD
+        assert_equal [r XLEN mystream] 3
+    }
 }
