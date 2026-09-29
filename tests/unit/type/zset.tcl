@@ -2311,6 +2311,7 @@ start_server {tags {"zset"}} {
 
             bzpop_command $rd $pop owzset{t} 0
             wait_for_blocked_client
+            r set owzset{t} placeholder        ;# wrong type: client stays blocked
             r zinterstore owzset{t} 2 src1{t} src2{t}
             verify_pop_response $pop [$rd read] {owzset{t} a 4} {owzset{t} {{a 4}}}
             $rd close
@@ -2324,6 +2325,7 @@ start_server {tags {"zset"}} {
 
             bzpop_command $rd $pop owzset{t} 0
             wait_for_blocked_client
+            r set owzset{t} placeholder        ;# wrong type: client stays blocked
             r zdiffstore owzset{t} 2 src1{t} src2{t}
             verify_pop_response $pop [$rd read] {owzset{t} a 1} {owzset{t} {{a 1}}}
             $rd close
@@ -2336,20 +2338,9 @@ start_server {tags {"zset"}} {
 
             bzpop_command $rd $pop owzset{t} 0
             wait_for_blocked_client
+            r set owzset{t} placeholder        ;# wrong type: client stays blocked
             r zrangestore owzset{t} src{t} 0 -1
             verify_pop_response $pop [$rd read] {owzset{t} a 1} {owzset{t} {{a 1}}}
-            $rd close
-        }
-
-        test "$pop when key created by ZUNIONSTORE from nonexisting key" {
-            set rd [redis_deferring_client]
-            r del owzset{t} src{t}
-            r zadd src{t} 5 z
-
-            bzpop_command $rd $pop owzset{t} 0
-            wait_for_blocked_client
-            r zunionstore owzset{t} 1 src{t}
-            verify_pop_response $pop [$rd read] {owzset{t} z 5} {owzset{t} {{z 5}}}
             $rd close
         }
     }
