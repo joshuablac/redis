@@ -4356,13 +4356,15 @@ mstime_t RM_GetExpire(RedisModuleKey *key) {
  * the number of milliseconds of TTL the key should have.
  *
  * The function returns REDISMODULE_OK on success or REDISMODULE_ERR if
- * the key was not open for writing or is an empty key. */
+ * the key was not open for writing, is an empty key, or if adding the
+ * relative TTL to the current time would overflow. */
 int RM_SetExpire(RedisModuleKey *key, mstime_t expire) {
     if (!(key->mode & REDISMODULE_WRITE) || key->kv == NULL || (expire < 0 && expire != REDISMODULE_NO_EXPIRE))
         return REDISMODULE_ERR;
     if (expire != REDISMODULE_NO_EXPIRE) {
-        expire += commandTimeSnapshot();
-        /* setExpire() might realloc kvobj */ 
+        if (add_overflow_ll(expire, commandTimeSnapshot(), &expire))
+            return REDISMODULE_ERR;
+        /* setExpire() might realloc kvobj */
         key->kv = setExpire(key->ctx->client,key->db,key->key,expire);
     } else {
         removeExpire(key->db,key->key);

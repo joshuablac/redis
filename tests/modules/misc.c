@@ -561,6 +561,26 @@ int test_signalmodifiedkey(RedisModuleCtx *ctx, RedisModuleString **argv, int ar
     return REDISMODULE_OK;
 }
 
+/* TEST.SET_EXPIRE <key> <relative-ms>: wraps RedisModule_SetExpire() so a
+ * relative TTL that overflows when added to the current time can be
+ * exercised from Tcl. Replies with the integer REDISMODULE_OK(0)/
+ * REDISMODULE_ERR(1) return code. */
+int test_set_expire(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc != 3) return RedisModule_WrongArity(ctx);
+
+    long long ms;
+    if (RedisModule_StringToLongLong(argv[2], &ms) != REDISMODULE_OK) {
+        RedisModule_ReplyWithError(ctx, "invalid ms");
+        return REDISMODULE_OK;
+    }
+
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, argv[1], REDISMODULE_READ | REDISMODULE_WRITE);
+    int ret = RedisModule_SetExpire(key, ms);
+    RedisModule_CloseKey(key);
+    RedisModule_ReplyWithLongLong(ctx, ret);
+    return REDISMODULE_OK;
+}
+
 int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
@@ -636,6 +656,8 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (RedisModule_CreateSubcommand(parent, "set", only_reply_ok, "no-cluster", 0, 0, 0) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
     if (RedisModule_CreateCommand(ctx, "test.signalmodifiedkey", test_signalmodifiedkey, "write", 1, 1, 1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+    if (RedisModule_CreateCommand(ctx, "test.set_expire", test_set_expire, "write", 1, 1, 1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     return REDISMODULE_OK;

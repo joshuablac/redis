@@ -178,6 +178,40 @@ start_server {overrides {save {900 1}} tags {"modules external:skip"}} {
         r config set maxmemory-policy $old_policy
     } {OK} {slow}
 
+    test {RM_SetExpire - overflow is rejected without modifying the key} {
+        r set mykey{t} myvalue
+        r persist mykey{t}
+        set expired_before [s expired_keys]
+
+        # A relative TTL that overflows when added to the current command
+        # time must be rejected (REDISMODULE_ERR == 1), not stored as a
+        # wrapped-negative absolute expire.
+        assert_equal 1 [r test.set_expire mykey{t} 9223372036854775807]
+        assert_equal 1 [r exists mykey{t}]
+        assert_equal -1 [r pttl mykey{t}]
+
+        # Same for a relative TTL that is smaller than LLONG_MAX but still
+        # overflows once the current time is added to it.
+        set almost_max [expr {9223372036854775807 - [clock milliseconds] + 1000}]
+        assert_equal 1 [r test.set_expire mykey{t} $almost_max]
+        assert_equal 1 [r exists mykey{t}]
+        assert_equal -1 [r pttl mykey{t}]
+
+        # None of the rejected calls may have snuck a wrapped-negative expire
+        # in: the key must not get reaped by the active-expire cycle.
+        after 600
+        assert_equal 1 [r exists mykey{t}]
+        assert_equal $expired_before [s expired_keys]
+    }
+
+    test {RM_SetExpire - a large non-overflowing relative TTL still succeeds} {
+        r set mykey{t} myvalue
+        set just_under [expr {9223372036854775807 - [clock milliseconds] - 100000}]
+        assert_equal 0 [r test.set_expire mykey{t} $just_under]
+        assert {[r pttl mykey{t}] > 0}
+        r persist mykey{t}
+    }
+
     test {publish to self inside rm_call} {
         r hello 3
         r subscribe foo
