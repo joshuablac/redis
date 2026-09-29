@@ -837,6 +837,66 @@ start_server {tags {"external:skip needs:debug"}} {
             assert_equal [r HTTL myhash FIELDS 2 f1 f2] "$T_NO_EXPIRY $T_NO_EXPIRY"
         }
 
+        test "HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT - does not resurrect a field that already expired ($type)" {
+            r debug set-active-expire 0
+            r del myhash
+            r hset myhash f1 secret f2 other
+            r hpexpire myhash 1 FIELDS 1 f1
+            after 15
+            assert_encoding $type myhash
+            # Sanity: the field is already logically gone (checked via HTTL,
+            # which -- unlike HGET/HEXISTS -- does not itself lazily reclaim
+            # the field, so it can't mask the bug under test below).
+            assert_equal [r httl myhash FIELDS 1 f1] $T_NO_FIELD
+
+            # None of the four HEXPIRE-family commands may re-arm the TTL and
+            # bring the stale value back -- they must reply exactly as for a
+            # field that was never there.
+            assert_equal [r hexpire myhash 1000 FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hpexpire myhash 1000 FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hexpireat myhash [expr {[clock seconds]+1000}] FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hpexpireat myhash [expr {[clock milliseconds]+1000000}] FIELDS 1 f1] $E_NO_FIELD
+
+            assert_equal [r hget myhash f1] {}
+            assert_equal [r httl myhash FIELDS 1 f1] $T_NO_FIELD
+            assert_equal [r hget myhash f2] "other"
+            r debug set-active-expire 1
+        }
+
+        test "HEXPIRE - does not resurrect an already expired field regardless of NX/XX/GT/LT ($type)" {
+            r debug set-active-expire 0
+            r del myhash
+            r hset myhash f1 secret
+            r hpexpire myhash 1 FIELDS 1 f1
+            after 15
+
+            assert_equal [r hexpire myhash 1000 NX FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hexpire myhash 1000 XX FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hexpire myhash 1000 GT FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hexpire myhash 1000 LT FIELDS 1 f1] $E_NO_FIELD
+            assert_equal [r hget myhash f1] {}
+            r debug set-active-expire 1
+        }
+
+        test "HEXPIRE - an already expired field is dropped from what's propagated to the replication stream/AOF ($type)" {
+            r debug set-active-expire 0
+            r del myhash
+            r hset myhash f1 secret f2 v2
+            r hpexpire myhash 1 FIELDS 1 f1
+            after 15
+
+            set repl [attach_to_replication_stream]
+            assert_equal [r hexpire myhash 1000 FIELDS 2 f1 f2] "$E_NO_FIELD $E_OK"
+            # Only the field that was actually (re)armed is propagated; the
+            # already-expired field must not appear in the rewritten command.
+            assert_replication_stream $repl {
+                {select *}
+                {hpexpireat myhash * FIELDS 1 f2}
+            }
+            close_replication_stream $repl
+            r debug set-active-expire 1
+        }
+
         test "HTTL/HPERSIST - Test expiry commands with non-volatile hash ($type)" {
             r del myhash
             r hset myhash field1 value1 field2 value2 field3 value3

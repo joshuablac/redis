@@ -203,6 +203,15 @@ typedef struct HashTypeSetEx {
 
     /*** config ***/
     ExpireSetCond expireSetCond;        /* [XX | NX | GT | LT] */
+    int rejectAlreadyExpiredField;      /* If a field's *current* TTL has already
+                                         * elapsed (logically expired, not yet lazily
+                                         * reclaimed), fail like a missing field
+                                         * instead of resurrecting it with a new TTL.
+                                         * Only HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT
+                                         * set this: other callers (HSETEX, HGETEX)
+                                         * either overwrite the value first or already
+                                         * filter out expired fields before calling
+                                         * hashTypeSetEx(). */
 
     /*** metadata ***/
     uint64_t minExpire;                 /* if uninit EB_EXPIRE_TIME_INVALID */
@@ -1860,6 +1869,15 @@ SetExRes hashTypeSetExpiryListpack(HashTypeSetEx *ex, sds field,
         prevExpire = (uint64_t) expireTime;
     }
 
+    /* The field is logically expired already (its current TTL has passed but
+     * it hasn't been lazily reclaimed yet): treat it like a missing field
+     * instead of re-arming its TTL and resurrecting the stale value. */
+    if (ex->rejectAlreadyExpiredField && prevExpire != EB_EXPIRE_TIME_INVALID &&
+        (long long)prevExpire < commandTimeSnapshot())
+    {
+        return HSETEX_NO_FIELD;
+    }
+
     /* Special value of EXPIRE_TIME_INVALID indicates field should be persisted.*/
     if (expireAt == EB_EXPIRE_TIME_INVALID) {
         /* Return error if already there is no ttl. */
@@ -2461,6 +2479,16 @@ SetExRes hashTypeSetExpiryHT(HashTypeSetEx *exInfo, sds field, uint64_t expireAt
 
     dictEntry *existingEntry = *link;
     Entry *oldEntry = dictGetKey(existingEntry);
+
+    /* The field is logically expired already (its current TTL has passed but
+     * it hasn't been lazily reclaimed yet): treat it like a missing field
+     * instead of re-arming its TTL and resurrecting the stale value. */
+    if (exInfo->rejectAlreadyExpiredField && entryHasExpiry(oldEntry) &&
+        (long long)entryGetExpiry(oldEntry) < commandTimeSnapshot())
+    {
+        return HSETEX_NO_FIELD;
+    }
+
     /* Special value of EXPIRE_TIME_INVALID indicates field should be persisted.*/
     if (expireAt == EB_EXPIRE_TIME_INVALID) {
         /* Return error if already there is no ttl. */
@@ -2591,6 +2619,7 @@ int hashTypeSetExInit(robj *key, kvobj *o, client *c, redisDb *db,
 {
     dict *ht = o->ptr;
     ex->expireSetCond = expireSetCond;
+    ex->rejectAlreadyExpiredField = 0;
     ex->minExpire = EB_EXPIRE_TIME_INVALID;
     ex->c = c;
     ex->db = db;
@@ -6611,6 +6640,10 @@ static void hexpireGenericCommand(client *c, long long basetime, int unit) {
 
     HashTypeSetEx exCtx;
     hashTypeSetExInit(keyArg, hashObj, c, c->db, args.expireCondition, &exCtx);
+    /* HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT only adjust the TTL of an
+     * unchanged value: a field whose current TTL already elapsed must not
+     * be resurrected (see hpersistCommand(), which has the same check). */
+    exCtx.rejectAlreadyExpiredField = 1;
     addReplyArrayLen(c, args.fieldCount);
 
     /* Lazy allocation of fieldsToRemove - only allocate when failures occur */
