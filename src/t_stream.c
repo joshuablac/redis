@@ -888,9 +888,12 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         if (limit && (deleted + entries) > limit) {
             /* Report exactly where we stopped: this node (and everything
              * after it) is untouched, while every earlier node was fully
-             * processed. A node's rax key equals the ID of its first
-             * entry, so decoding it gives the correct boundary for an
-             * equivalent exact trim (see streamRewriteTrimArgument()). */
+             * processed. A node's rax key is its master ID: the ID of the
+             * first entry ever inserted into it, which may itself be a
+             * tombstone by now, but is still greater than every ID in
+             * every earlier node and not greater than any ID in this one
+             * -- exactly the boundary an equivalent exact trim needs (see
+             * streamRewriteTrimArgument()). */
             args->trim_limit_reached = 1;
             streamDecodeID(ri.key, &args->trim_limit_at_id);
             break;
@@ -2536,9 +2539,15 @@ void streamRewriteApproxSpecifier(client *c, int idx) {
     rewriteClientCommandArgument(c,idx,shared.special_equals);
 }
 
-/* We propagate MAXLEN ~ <count> as MAXLEN = <resulting-len-of-stream>, which
- * is deterministic regardless of delete strategy: replaying it always trims
- * to that exact length.
+/* We propagate MAXLEN ~ <count> as MAXLEN = <resulting-len-of-stream>. That
+ * reproduces the master exactly for KEEPREF, the only strategy that removes
+ * whole nodes at a time. It is NOT exact for DELREF/ACKED: replaying against
+ * the stream's *resulting* length instead of the original target can still
+ * make per-node eligibility diverge partway through (eligibility depends on
+ * comparing the live length against the target throughout, not just on
+ * reaching a length milestone), so a replica/AOF reload can end up with a
+ * different set of entries even at the same final length. That is a
+ * pre-existing gap and out of scope here; this fix only changes MINID.
  *
  * MINID is different for the non-KEEPREF (DELREF/ACKED) delete strategies,
  * because they leave deleted entries in place as tombstones instead of

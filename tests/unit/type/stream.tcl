@@ -3696,19 +3696,21 @@ start_server {tags {"stream needs:debug"} overrides {appendonly yes}} {
 
 start_server {tags {"stream needs:debug"} overrides {appendonly yes}} {
     test {XTRIM with ~ MINID, ACKED and LIMIT does not over-trim on reload} {
-        # LIMIT stops the master before it ever looks at the second node, but
-        # the first node's ACKED processing already left a tombstone (1-0)
-        # behind a still-live entry (2-0). The propagated command must target
-        # the first ID of the untouched node (3-0), matching exactly what the
-        # master itself removed -- not "the first entry still in the stream"
-        # (1-0's tombstone, which would make the replica delete nothing) and
-        # not the original MINID 9-0 either (which would make the replica
-        # delete everything, over-trimming past what LIMIT allowed).
+        # LIMIT stops the master after processing the first node (1-0
+        # deleted since it's acked, 2-0 kept since it isn't) and before it
+        # ever looks at the second node onward -- 5-0, in the third node,
+        # is acked too but the master never gets to it. Propagating the
+        # *original* MINID 9-0 would replay unlimited on the replica/AOF
+        # and delete 5-0 as well (it's acked, and an unlimited replay
+        # reaches every node), over-trimming past what LIMIT actually let
+        # the master do. The propagated command must instead target the
+        # first ID of the untouched node (3-0), so the replay stops at the
+        # same point the master did and leaves 5-0 alone.
         set origin [config_get_set stream-node-max-entries 2]
         foreach id {1-0 2-0 3-0 4-0 5-0 6-0 7-0 8-0} { r XADD mystream $id f v }
         r XGROUP CREATE mystream g 0
         r XREADGROUP GROUP g c STREAMS mystream >
-        r XACK mystream g 1-0
+        r XACK mystream g 1-0 5-0
         assert_equal 1 [r XTRIM mystream MINID ~ 9-0 LIMIT 2 ACKED]
         set before [r XRANGE mystream - +]
         assert_equal {{2-0 {f v}} {3-0 {f v}} {4-0 {f v}} {5-0 {f v}} {6-0 {f v}} {7-0 {f v}} {8-0 {f v}}} $before
